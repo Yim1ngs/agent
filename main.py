@@ -4,6 +4,7 @@ import os
 import sys
 from pathlib import Path
 from dotenv import load_dotenv
+import json
 
 from agent.client_claude import ClaudeNewAPIClient
 from agent.web_tools import WebToolRegistry
@@ -124,31 +125,38 @@ Important operating constraints:
         for r in context.get("rounds", []):
             llm_resp = r.get("llm_response", {})
             content = llm_resp.get("content", [])
-            if content:
-                last_messages.append({"role": "assistant", "content": content})
+
+            if not content:
+                continue
+
+            # 【修复点】：将历史工具调用降维成纯文本，绕过中转 API 的格式校验 Bug
+            assistant_text = ""
+            for block in content:
+                if block.get("type") == "text":
+                    assistant_text += block.get("text", "") + "\n"
+                elif block.get("type") == "tool_use":
+                    assistant_text += f"[Action: Tool '{block.get('name')}' called with input: {json.dumps(block.get('input'), ensure_ascii=False)}]\n"
+
+            if assistant_text:
+                last_messages.append({"role": "assistant", "content": assistant_text.strip()})
 
             if "tool_results" in r:
-                tool_result_blocks = []
+                user_text = ""
                 for tr in r["tool_results"]:
-                    tool_result_blocks.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": f"resumed_{r['round']}",
-                            "content": str(tr["result"]),
-                        }
-                    )
-                if tool_result_blocks:
-                    last_messages.append(
-                        {"role": "user", "content": tool_result_blocks}
-                    )
+                    user_text += f"[Tool Result for '{tr.get('tool_name')}']: {json.dumps(tr.get('result'), ensure_ascii=False)}\n"
+
+                if user_text:
+                    last_messages.append({"role": "user", "content": user_text.strip()})
 
         if human_hint:
-            last_messages.append(
-                {
-                    "role": "user",
-                    "content": f"Human operator hint: {human_hint}\n\nPlease continue based on this hint and previous attempts.",
-                }
-            )
+            hint_text = f"Human operator hint: {human_hint}\n\nPlease continue based on this hint and previous attempts."
+            if last_messages and last_messages[-1]["role"] == "user":
+                if isinstance(last_messages[-1]["content"], list):
+                    last_messages[-1]["content"].append({"type": "text", "text": hint_text})
+                else:
+                    last_messages[-1]["content"] += f"\n\n{hint_text}"
+            else:
+                last_messages.append({"role": "user", "content": hint_text})
 
         agent = WebCTFAgent(
             client=client,

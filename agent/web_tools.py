@@ -5,6 +5,10 @@ import os
 import re
 import subprocess
 import uuid
+import base64
+import binascii
+import hashlib
+import urllib.parse
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -277,6 +281,30 @@ class WebToolRegistry:
                     "required": ["test_path"],
                 },
             },
+            {
+                "name": "text_encoder_decoder",
+                "description": "Encode, decode, or hash a string. Extremely useful for CTF bypasses, token forging, or payload generation.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": [
+                                "base64_encode", "base64_decode",
+                                "url_encode", "url_decode",
+                                "hex_encode", "hex_decode",
+                                "md5", "sha1", "sha256"
+                            ],
+                            "description": "The operation to perform."
+                        },
+                        "text": {
+                            "type": "string",
+                            "description": "The input string to process."
+                        }
+                    },
+                    "required": ["action", "text"],
+                },
+            },
         ]
 
     # =========================
@@ -541,3 +569,33 @@ class WebToolRegistry:
             "stdout": proc.stdout[-12000:],
             "stderr": proc.stderr[-12000:],
         }
+    def _tool_text_encoder_decoder(self, action: str, text: str) -> Dict[str, Any]:
+        """
+        Versatile encoding, decoding, and hashing tool.
+        """
+        try:
+            result = ""
+            if action == "base64_encode":
+                result = base64.b64encode(text.encode('utf-8')).decode('utf-8')
+            elif action == "base64_decode":
+                result = base64.b64decode(text.encode('utf-8')).decode('utf-8', errors='replace')
+            elif action == "url_encode":
+                result = urllib.parse.quote(text)
+            elif action == "url_decode":
+                result = urllib.parse.unquote(text)
+            elif action == "hex_encode":
+                result = binascii.hexlify(text.encode('utf-8')).decode('utf-8')
+            elif action == "hex_decode":
+                result = binascii.unhexlify(text.encode('utf-8')).decode('utf-8', errors='replace')
+            elif action == "md5":
+                result = hashlib.md5(text.encode('utf-8')).hexdigest()
+            elif action == "sha1":
+                result = hashlib.sha1(text.encode('utf-8')).hexdigest()
+            elif action == "sha256":
+                result = hashlib.sha256(text.encode('utf-8')).hexdigest()
+            else:
+                return {"ok": False, "error": f"Unknown action: {action}"}
+
+            return {"ok": True, "action": action, "result": result}
+        except Exception as e:
+            return {"ok": False, "error": f"Encoding/Decoding failed: {e}"}

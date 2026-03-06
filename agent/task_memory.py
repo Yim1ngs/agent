@@ -7,6 +7,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
+from pathlib import Path
 
 def _now_ts() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
@@ -64,7 +65,7 @@ class TaskMemory:
                 raw = json.load(f)
             self.state = TaskMemoryState(
                 task_id=raw["task_id"],
-                objective=raw["objective"],
+                objective=raw.get("objective", raw.get("task_description", "")),
                 status=raw.get("status", "running"),
                 created_at=raw.get("created_at", time.time()),
                 completed_at=raw.get("completed_at"),
