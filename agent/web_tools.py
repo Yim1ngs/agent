@@ -305,6 +305,18 @@ class WebToolRegistry:
                     "required": ["action", "text"],
                 },
             },
+            {
+                "name": "execute_local_command",
+                "description": "Run a local shell command or execute a script (e.g., python3 exp.py). Used for running generated exploit scripts.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string", "description": "The command to run"},
+                        "cwd": {"type": "string", "description": "Working directory (e.g., ./challenges)"}
+                    },
+                    "required": ["command"]
+                }
+            }
         ]
 
     # =========================
@@ -599,3 +611,27 @@ class WebToolRegistry:
             return {"ok": True, "action": action, "result": result}
         except Exception as e:
             return {"ok": False, "error": f"Encoding/Decoding failed: {e}"}
+
+    def _tool_execute_local_command(self, command: str, cwd: str = "./challenges") -> Dict[str, Any]:
+        """Runs a shell command safely inside the workspace."""
+        try:
+            safe_cwd = self._safe_path(cwd)
+
+            proc = subprocess.run(
+                command,
+                cwd=safe_cwd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                shell=True
+            )
+            return {
+                "ok": True,
+                "returncode": proc.returncode,
+                "stdout": proc.stdout[-10000:],
+                "stderr": proc.stderr[-10000:]
+            }
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "Command execution timed out after 30 seconds."}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}

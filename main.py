@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
-import sys
+import asyncio
+import json
 from pathlib import Path
 from dotenv import load_dotenv
-import json
+
+from mcp import StdioServerParameters
 
 from agent.client_claude import ClaudeNewAPIClient
 from agent.web_tools import WebToolRegistry
@@ -17,10 +19,10 @@ def _load_env() -> None:
     candidates = [
         here / ".env",
         here.parent / ".env",
-    ]
+        ]
     for p in candidates:
         if p.exists():
-            load_dotenv(dotenv_path=p, override=False)
+            load_dotenv(dotenv_path=p, override=True)
 
 
 def _require_env(name: str) -> str:
@@ -30,7 +32,7 @@ def _require_env(name: str) -> str:
     return v
 
 
-def main() -> None:
+async def main() -> None:
     _load_env()
 
     api_key = _require_env("LLM_API_KEY")
@@ -83,6 +85,62 @@ def main() -> None:
         writable_roots=writable_roots,
     )
 
+    mcp_servers = [
+        # ==========================================
+        # 1. Web 动态交互与渗透测试
+        # ==========================================
+        StdioServerParameters(
+            command="npx",
+            args=["-y", "@modelcontextprotocol/server-puppeteer"],
+        ),
+
+        # ==========================================
+        # 2. 极速纯文本/API 抓取
+        # ==========================================
+        #StdioServerParameters(
+        #    command="npx",
+        #    args=["-y", "@modelcontextprotocol/server-fetch"],
+        #),
+
+        # ==========================================
+        # 3. 本地文件系统管理
+        # 功能：赋予大模型在指定目录下自由新建、编辑、读取文件的能力。
+        # ==========================================
+        #StdioServerParameters(
+        #    command="npx",
+        #    args=["-y", "@modelcontextprotocol/server-filesystem", "./challenges"],
+        #),
+
+        # ==========================================
+        # 4. GitHub 源码与 PoC 搜集
+        # 功能：允许大模型直接在 GitHub 上搜索代码库、读取 Issues 和源码。
+        # 提示：运行前最好在 .env 中配置 GITHUB_PERSONAL_ACCESS_TOKEN 提升 API 额度
+        # ==========================================
+        #StdioServerParameters(
+        #    command="npx",
+        #    args=["-y", "@modelcontextprotocol/server-github"],
+        #),
+
+        # ==========================================
+        # 5. Brave Search 搜索引擎 (互联网冲浪与查资料)
+        # 功能：赋予 Agent 直接搜索互联网的能力。
+        # 提示：需要在 .env 中配置 BRAVE_API_KEY
+        # ==========================================
+        #StdioServerParameters(
+        #    command="npx",
+        #    args=["-y", "@modelcontextprotocol/server-brave-search"],
+        #)
+
+        # ==========================================
+        # 6. SQLite 数据库分析
+        # 功能：直接让大模型对本地的 .db 文件执行 SQL 语句。
+        # ==========================================
+        #StdioServerParameters(
+        #    command="uvx",
+        #    args=["mcp-server-sqlite", "--db-path", "./challenges/ctf_database.db"],
+        #)
+    ]
+
     task_description = f"""
 You are solving an authorized ONLINE web CTF challenge.
 
@@ -129,7 +187,6 @@ Important operating constraints:
             if not content:
                 continue
 
-            # 【修复点】：将历史工具调用降维成纯文本，绕过中转 API 的格式校验 Bug
             assistant_text = ""
             for block in content:
                 if block.get("type") == "text":
@@ -148,15 +205,27 @@ Important operating constraints:
                 if user_text:
                     last_messages.append({"role": "user", "content": user_text.strip()})
 
+        system_warning = (
+            f"\n\nCRITICAL SYSTEM WARNING:\n"
+            f"1. The CURRENT TARGET URL is: {target_url}\n"
+            f"   (If this URL is different from the history, you MUST use this new URL for all future requests!)\n"
+            f"2. In the history above, past tool calls are shown as text `[Action: Tool ...]`. "
+            f"This is ONLY a transcript. You CANNOT execute tools by typing `[Action: Tool ...]`. "
+            f"You MUST strictly use the native JSON Tool Calling mechanism to make your next move!"
+        )
+
         if human_hint:
-            hint_text = f"Human operator hint: {human_hint}\n\nPlease continue based on this hint and previous attempts."
-            if last_messages and last_messages[-1]["role"] == "user":
-                if isinstance(last_messages[-1]["content"], list):
-                    last_messages[-1]["content"].append({"type": "text", "text": hint_text})
-                else:
-                    last_messages[-1]["content"] += f"\n\n{hint_text}"
+            final_text = f"Human operator hint: {human_hint}" + system_warning
+        else:
+            final_text = "System Resume Notice: Continuing task." + system_warning
+
+        if last_messages and last_messages[-1]["role"] == "user":
+            if isinstance(last_messages[-1]["content"], list):
+                last_messages[-1]["content"].append({"type": "text", "text": final_text})
             else:
-                last_messages.append({"role": "user", "content": hint_text})
+                last_messages[-1]["content"] += f"\n\n{final_text}"
+        else:
+            last_messages.append({"role": "user", "content": final_text})
 
         agent = WebCTFAgent(
             client=client,
@@ -164,9 +233,10 @@ Important operating constraints:
             runs_dir=os.getenv("RUNS_DIR", "./runs"),
             max_rounds=int(os.getenv("AGENT_MAX_ROUNDS", "20")),
             memory=memory,
+            mcp_configs=mcp_servers,
         )
 
-        result = agent.solve(
+        result = await agent.solve(
             task_description, resume_messages=last_messages if last_messages else None
         )
     else:
@@ -180,9 +250,10 @@ Important operating constraints:
             runs_dir=os.getenv("RUNS_DIR", "./runs"),
             max_rounds=int(os.getenv("AGENT_MAX_ROUNDS", "20")),
             memory=memory,
+            mcp_configs=mcp_servers,
         )
 
-        result = agent.solve(task_description)
+        result = await agent.solve(task_description)
 
     print("\n=== AGENT RESULT ===")
     if result.get("ok"):
@@ -197,4 +268,4 @@ Important operating constraints:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

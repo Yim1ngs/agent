@@ -8,6 +8,7 @@ dependencies = [
     "beautifulsoup4>=4.14.3",
     "httpx>=0.28.1",
     "lxml>=6.0.2",
+    "mcp>=1.26.0",
     "pydantic>=2.12.5",
     "pytest>=9.0.2",
     "python-dotenv>=1.2.2",
@@ -15,3 +16,7 @@ dependencies = [
     "rich>=14.3.3",
     "tenacity>=9.1.4",
 ]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple/"
+default = true
