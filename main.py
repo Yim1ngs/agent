@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import asyncio
 import json
+import traceback
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -11,8 +12,7 @@ from mcp import StdioServerParameters
 from agent.client_claude import ClaudeNewAPIClient
 from agent.web_tools import WebToolRegistry
 from agent.agent_loop import WebCTFAgent
-from agent.task_memory import TaskMemoryManager
-
+from agent.task_memory import TaskMemoryManager, TaskMemory
 
 def _load_env() -> None:
     here = Path(__file__).resolve().parent
@@ -24,13 +24,60 @@ def _load_env() -> None:
         if p.exists():
             load_dotenv(dotenv_path=p, override=True)
 
-
 def _require_env(name: str) -> str:
     v = os.getenv(name, "").strip()
     if not v:
         raise RuntimeError(f"Missing required env var: {name}")
     return v
 
+def build_resume_messages(memory: TaskMemory, user_input: str) -> list[dict]:
+    """从 TaskMemory 中提取历史轮次，并拼接用户最新的输入"""
+    context = memory.get_full_context()
+    last_messages = []
+
+    for r in context.get("rounds", []):
+        llm_resp = r.get("llm_response", {})
+        content = llm_resp.get("content", [])
+
+        if not content:
+            continue
+
+        assistant_text = ""
+        for block in content:
+            if block.get("type") == "text":
+                assistant_text += block.get("text", "") + "\n"
+            elif block.get("type") == "tool_use":
+                assistant_text += f"[Action: Tool '{block.get('name')}' called with input: {json.dumps(block.get('input'), ensure_ascii=False)}]\n"
+
+        if assistant_text:
+            last_messages.append({"role": "assistant", "content": assistant_text.strip()})
+
+        if "tool_results" in r:
+            user_text = ""
+            for tr in r["tool_results"]:
+                user_text += f"[Tool Result for '{tr.get('tool_name')}']: {json.dumps(tr.get('result'), ensure_ascii=False)}\n"
+
+            if user_text:
+                last_messages.append({"role": "user", "content": user_text.strip()})
+
+    system_warning = (
+        f"\n\nCRITICAL SYSTEM WARNING:\n"
+        f"In the history above, past tool calls are shown as text `[Action: Tool ...]`. "
+        f"This is ONLY a transcript. You CANNOT execute tools by typing `[Action: Tool ...]`. "
+        f"You MUST strictly use the native JSON Tool Calling mechanism to make your next move!"
+    )
+
+    final_text = f"Human operator input/hint: {user_input}" + system_warning if user_input else "System Resume Notice: Continuing task." + system_warning
+
+    if last_messages and last_messages[-1]["role"] == "user":
+        if isinstance(last_messages[-1]["content"], list):
+            last_messages[-1]["content"].append({"type": "text", "text": final_text})
+        else:
+            last_messages[-1]["content"] += f"\n\n{final_text}"
+    else:
+        last_messages.append({"role": "user", "content": final_text})
+
+    return last_messages
 
 async def main() -> None:
     _load_env()
@@ -39,16 +86,10 @@ async def main() -> None:
     base_url = os.getenv("LLM_BASE_URL", "http://newapi.200m.997555.xyz").strip()
     model = os.getenv("LLM_MODEL_ID", "claude-opus-4-6").strip()
 
-    target_url = _require_env("CTF_TARGET_URL").rstrip("/")
-
+    target_url = os.getenv("CTF_TARGET_URL", "Target URL pending from user").rstrip("/")
     workspace_root = os.getenv("CTF_WORKSPACE_ROOT", "./challenges").strip()
-    candidate_flag_path = os.getenv(
-        "CTF_CANDIDATE_FLAG_PATH",
-        "challenges/web_demo/workspace/candidate_flag.txt",
-    ).strip()
-    test_path = os.getenv(
-        "CTF_TEST_PATH", "challenges/web_demo/tests/test_success.py"
-    ).strip()
+    candidate_flag_path = os.getenv("CTF_CANDIDATE_FLAG_PATH", "challenges/web_demo/workspace/candidate_flag.txt").strip()
+    test_path = os.getenv("CTF_TEST_PATH", "challenges/web_demo/tests/test_success.py").strip()
     test_cwd = os.getenv("CTF_TEST_CWD", "challenges").strip()
 
     writable_roots_raw = os.getenv("CTF_WRITABLE_ROOTS", "").strip()
@@ -58,19 +99,8 @@ async def main() -> None:
         writable_roots = [str(Path(candidate_flag_path).parent)]
 
     allowed_hosts_raw = os.getenv("CTF_ALLOWED_HOSTS", "").strip()
-    allowed_hosts = (
-        [h.strip() for h in allowed_hosts_raw.split(",") if h.strip()]
-        if allowed_hosts_raw
-        else None
-    )
-
+    allowed_hosts = [h.strip() for h in allowed_hosts_raw.split(",") if h.strip()] if allowed_hosts_raw else None
     flag_regex = os.getenv("CTF_FLAG_REGEX", r"^flag\{[A-Za-z0-9_\-]+\}$").strip()
-
-    memory_dir = os.getenv("MEMORY_DIR", "./memory").strip()
-    memory_manager = TaskMemoryManager(memory_dir)
-
-    resume_task_id = os.getenv("RESUME_TASK_ID", "").strip()
-    human_hint = os.getenv("HUMAN_HINT", "").strip()
 
     client = ClaudeNewAPIClient(
         base_url=base_url,
@@ -86,186 +116,103 @@ async def main() -> None:
     )
 
     mcp_servers = [
-        # ==========================================
-        # 1. Web 动态交互与渗透测试
-        # ==========================================
         StdioServerParameters(
             command="npx",
             args=["-y", "@modelcontextprotocol/server-puppeteer"],
         ),
-
-        # ==========================================
-        # 2. 极速纯文本/API 抓取
-        # ==========================================
-        #StdioServerParameters(
-        #    command="npx",
-        #    args=["-y", "@modelcontextprotocol/server-fetch"],
-        #),
-
-        # ==========================================
-        # 3. 本地文件系统管理
-        # 功能：赋予大模型在指定目录下自由新建、编辑、读取文件的能力。
-        # ==========================================
-        #StdioServerParameters(
-        #    command="npx",
-        #    args=["-y", "@modelcontextprotocol/server-filesystem", "./challenges"],
-        #),
-
-        # ==========================================
-        # 4. GitHub 源码与 PoC 搜集
-        # 功能：允许大模型直接在 GitHub 上搜索代码库、读取 Issues 和源码。
-        # 提示：运行前最好在 .env 中配置 GITHUB_PERSONAL_ACCESS_TOKEN 提升 API 额度
-        # ==========================================
-        #StdioServerParameters(
-        #    command="npx",
-        #    args=["-y", "@modelcontextprotocol/server-github"],
-        #),
-
-        # ==========================================
-        # 5. Brave Search 搜索引擎 (互联网冲浪与查资料)
-        # 功能：赋予 Agent 直接搜索互联网的能力。
-        # 提示：需要在 .env 中配置 BRAVE_API_KEY
-        # ==========================================
-        #StdioServerParameters(
-        #    command="npx",
-        #    args=["-y", "@modelcontextprotocol/server-brave-search"],
-        #)
-
-        # ==========================================
-        # 6. SQLite 数据库分析
-        # 功能：直接让大模型对本地的 .db 文件执行 SQL 语句。
-        # ==========================================
-        #StdioServerParameters(
-        #    command="uvx",
-        #    args=["mcp-server-sqlite", "--db-path", "./challenges/ctf_database.db"],
-        #)
     ]
 
-    task_description = f"""
-You are solving an authorized ONLINE web CTF challenge.
+    memory_dir = os.getenv("MEMORY_DIR", "./memory").strip()
+    memory_manager = TaskMemoryManager(memory_dir)
 
-Target base URL:
-- {target_url}
+    max_rounds = int(os.getenv("AGENT_MAX_ROUNDS", "5"))
 
-Goals:
-1) Explore the website and find the REAL flag.
-2) Write the candidate flag ONLY into:
-   {candidate_flag_path}
-3) Run pytest verification using:
-   test_path = {test_path}
-   cwd = {test_cwd}
-4) If verification fails, continue investigating and retry.
-5) Report the final verified flag and the successful path used.
+    print("=====================================================")
+    print("启动。。。")
+    print(f"当前模型: {model}")
+    print("输入 'resume <task_id>' 可恢复历史任务。")
+    print("输入 'exit' 或 'quit' 退出。")
+    print("=====================================================\n")
 
-Important operating constraints:
-- Do NOT create, modify, or overwrite any test files.
-- Tests are trusted and immutable. If a test file is missing, report the issue instead of creating one.
-- Use extract_artifacts/assert_http after requests whenever helpful.
-- Use validate_candidate_flag before treating any value as a final flag.
-- A candidate is only valid if it BOTH:
-  (a) matches the expected platform flag regex: {flag_regex}
-  (b) passes pytest verification
-- If you find a flag-like string that does NOT match the regex (e.g., examples/sample flags such as Syc{{...}}),
-  treat it as a clue or artifact, NOT the final answer.
-- Avoid repeating the exact same failed request unchanged.
-""".strip()
+    current_memory = None
+    current_task_desc = ""
 
-    if resume_task_id:
-        print(f"\n=== RESUMING TASK: {resume_task_id} ===")
-        memory = memory_manager.load_task(resume_task_id)
+    while True:
+        try:
+            user_input = input("\n[You]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n[!] 收到退出信号，Agent 结束运行。")
+            break
 
-        if human_hint:
-            print(f"Human hint: {human_hint}")
-            memory.add_human_hint(human_hint)
+        if not user_input:
+            continue
+        if user_input.lower() in ["exit", "quit"]:
+            print("再见")
+            break
 
-        context = memory.get_full_context()
-        last_messages = []
-        for r in context.get("rounds", []):
-            llm_resp = r.get("llm_response", {})
-            content = llm_resp.get("content", [])
-
-            if not content:
+        # 场景 A：恢复历史任务
+        if user_input.startswith("resume "):
+            task_id = user_input.split(" ", 1)[1].strip()
+            try:
+                current_memory = memory_manager.load_task(task_id)
+                current_task_desc = current_memory.state.objective
+                print(f"[*] 已成功挂载历史任务: {task_id}")
+                user_input = "请继续当前任务"
+            except Exception as e:
+                print(f"[-] 恢复任务失败: {e}")
                 continue
 
-            assistant_text = ""
-            for block in content:
-                if block.get("type") == "text":
-                    assistant_text += block.get("text", "") + "\n"
-                elif block.get("type") == "tool_use":
-                    assistant_text += f"[Action: Tool '{block.get('name')}' called with input: {json.dumps(block.get('input'), ensure_ascii=False)}]\n"
+        elif not current_memory:
+            current_task_desc = f"""
+You are solving an authorized ONLINE web CTF challenge.
+Target Info / User Request: {user_input}
 
-            if assistant_text:
-                last_messages.append({"role": "assistant", "content": assistant_text.strip()})
+Goals & Constraints:
+1) Explore the website and find the REAL flag.
+2) Write the candidate flag ONLY into: {candidate_flag_path}
+3) Run pytest verification using: test_path = {test_path}, cwd = {test_cwd}
+4) A candidate is valid ONLY if it matches regex: {flag_regex} and passes pytest.
+""".strip()
+            current_memory = memory_manager.create_task(current_task_desc)
+            print(f"[*]创建新任务，Task ID: {current_memory.task_id}")
 
-            if "tool_results" in r:
-                user_text = ""
-                for tr in r["tool_results"]:
-                    user_text += f"[Tool Result for '{tr.get('tool_name')}']: {json.dumps(tr.get('result'), ensure_ascii=False)}\n"
+        else:
+            current_memory.add_human_hint(user_input)
+            print("[*]已记录入任务记忆。")
 
-                if user_text:
-                    last_messages.append({"role": "user", "content": user_text.strip()})
+        last_messages = build_resume_messages(current_memory, user_input)
 
-        system_warning = (
-            f"\n\nCRITICAL SYSTEM WARNING:\n"
-            f"1. The CURRENT TARGET URL is: {target_url}\n"
-            f"   (If this URL is different from the history, you MUST use this new URL for all future requests!)\n"
-            f"2. In the history above, past tool calls are shown as text `[Action: Tool ...]`. "
-            f"This is ONLY a transcript. You CANNOT execute tools by typing `[Action: Tool ...]`. "
-            f"You MUST strictly use the native JSON Tool Calling mechanism to make your next move!"
+        agent = WebCTFAgent(
+            client=client,
+            tools=tools,
+            runs_dir=os.getenv("RUNS_DIR", "./runs"),
+            max_rounds=max_rounds,
+            memory=current_memory,
+            mcp_configs=mcp_servers,
         )
 
-        if human_hint:
-            final_text = f"Human operator hint: {human_hint}" + system_warning
-        else:
-            final_text = "System Resume Notice: Continuing task." + system_warning
+        print(f"[Agent]:思考与执行... ")
+        try:
+            result = await agent.solve(
+                current_task_desc,
+                resume_messages=last_messages if last_messages else None
+            )
 
-        if last_messages and last_messages[-1]["role"] == "user":
-            if isinstance(last_messages[-1]["content"], list):
-                last_messages[-1]["content"].append({"type": "text", "text": final_text})
+            # --- 4. 打印当前阶段执行结果 ---
+            print("\n" + "="*40)
+            if result.get("ok"):
+                print(f"🟢 [Agent 本阶段汇报]:\n{result.get('response', '')}")
             else:
-                last_messages[-1]["content"] += f"\n\n{final_text}"
-        else:
-            last_messages.append({"role": "user", "content": final_text})
+                print(f"🔴 [Agent 执行暂停/异常]:\n{result.get('error')}")
+            print("="*40)
 
-        agent = WebCTFAgent(
-            client=client,
-            tools=tools,
-            runs_dir=os.getenv("RUNS_DIR", "./runs"),
-            max_rounds=int(os.getenv("AGENT_MAX_ROUNDS", "20")),
-            memory=memory,
-            mcp_configs=mcp_servers,
-        )
+            print(f"[*] 任务已暂停。当前任务 ID: {current_memory.task_id}")
+            print(f"[*] 日志路径: {result.get('run_log')}")
+            print("[*] 按回车让它继续。")
 
-        result = await agent.solve(
-            task_description, resume_messages=last_messages if last_messages else None
-        )
-    else:
-        print("\n=== STARTING NEW TASK ===")
-        memory = memory_manager.create_task(task_description)
-        print(f"Task ID: {memory.task_id}")
-
-        agent = WebCTFAgent(
-            client=client,
-            tools=tools,
-            runs_dir=os.getenv("RUNS_DIR", "./runs"),
-            max_rounds=int(os.getenv("AGENT_MAX_ROUNDS", "20")),
-            memory=memory,
-            mcp_configs=mcp_servers,
-        )
-
-        result = await agent.solve(task_description)
-
-    print("\n=== AGENT RESULT ===")
-    if result.get("ok"):
-        print(result.get("response", ""))
-    else:
-        print("ERROR:", result.get("error"))
-        print(f"\nTo resume this task, set: RESUME_TASK_ID={memory.task_id}")
-        print("To add human hint, set: HUMAN_HINT='your hint here'")
-
-    print(f"\n[run log] {result.get('run_log')}")
-    print(f"[memory] {memory.task_file}")
-
+        except Exception as e:
+            print(f"\n[!] 发生严重错误:\n{traceback.format_exc()}")
+            print("[*] 状态已保存，您可以稍后通过 'resume' 恢复。")
 
 if __name__ == "__main__":
     asyncio.run(main())

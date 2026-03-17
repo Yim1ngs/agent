@@ -316,6 +316,77 @@ class WebToolRegistry:
                     },
                     "required": ["command"]
                 }
+            },
+            {
+                "name": "wsl_shell",
+                "description": (
+                    "Execute a command inside WSL (Kali Linux). Use this for penetration testing tools "
+                    "like nmap, sqlmap, gobuster, nikto, hydra, curl, etc. "
+                    "Output is truncated to 2000 chars; redirect to a file and use grep/head for large outputs."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The shell command to execute inside WSL Kali (e.g., 'nmap -sV 192.168.1.1')"
+                        },
+                        "timeout_sec": {
+                            "type": "integer",
+                            "description": "Timeout in seconds (default 30, max 120)"
+                        },
+                        "distro": {
+                            "type": "string",
+                            "description": "WSL distribution name (default: kali-linux)"
+                        }
+                    },
+                    "required": ["command"]
+                }
+            },
+            {
+                "name": "python_sandbox",
+                "description": (
+                    "Execute arbitrary Python code in a local sandbox. The code is written to a temp .py file and run. "
+                    "Use this for writing and running exploit scripts, data processing, crypto operations, etc. "
+                    "Both stdout and stderr (including tracebacks) are captured and returned."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "Python code to execute"
+                        },
+                        "timeout_sec": {
+                            "type": "integer",
+                            "description": "Timeout in seconds (default 30, max 120)"
+                        }
+                    },
+                    "required": ["code"]
+                }
+            },
+            {
+                "name": "search_knowledge",
+                "description": (
+                    "Search the local CTF knowledge base for techniques, payloads, and writeups. "
+                    "Use this BEFORE blindly testing when you identify a vulnerability direction "
+                    "(e.g., SQLi, SSTI, RCE, deserialization, prototype pollution). "
+                    "Returns relevant knowledge articles matching keywords."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "keywords": {
+                            "type": "string",
+                            "description": "Space-separated keywords to search (e.g., 'SSTI Jinja2 payload')"
+                        },
+                        "category": {
+                            "type": "string",
+                            "description": "Optional category filter (e.g., 'sqli', 'ssti', 'rce', 'deserialize', 'prototype_pollution', 'xss', 'reverse')"
+                        }
+                    },
+                    "required": ["keywords"]
+                }
             }
         ]
 
@@ -635,3 +706,208 @@ class WebToolRegistry:
             return {"ok": False, "error": "Command execution timed out after 30 seconds."}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    # ===========================
+    # WSL Shell Tool
+    # ===========================
+    MAX_OUTPUT_CHARS = 2000
+    TRUNCATION_NOTICE = "\n\n[OUTPUT TRUNCATED at 2000 chars. Redirect to a file and use grep/head to view full output.]"
+
+    def _tool_wsl_shell(
+        self,
+        command: str,
+        timeout_sec: int = 30,
+        distro: str = "kali-linux",
+    ) -> Dict[str, Any]:
+        """Execute a command inside WSL (Kali Linux) with timeout and output truncation."""
+        timeout_sec = max(1, min(int(timeout_sec), 120))
+
+        dangerous_patterns = ["rm -rf /", "mkfs", "dd if=", ":(){", "fork bomb"]
+        cmd_lower = command.lower()
+        for pat in dangerous_patterns:
+            if pat in cmd_lower:
+                return {"ok": False, "error": f"Blocked dangerous command pattern: {pat}"}
+
+        try:
+            wsl_cmd = ["wsl", "-d", distro, "--", "bash", "-c", command]
+            proc = subprocess.run(
+                wsl_cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+                shell=False,
+            )
+
+            stdout = proc.stdout
+            stderr = proc.stderr
+            stdout_truncated = False
+            stderr_truncated = False
+
+            if len(stdout) > self.MAX_OUTPUT_CHARS:
+                stdout = stdout[:self.MAX_OUTPUT_CHARS] + self.TRUNCATION_NOTICE
+                stdout_truncated = True
+            if len(stderr) > self.MAX_OUTPUT_CHARS:
+                stderr = stderr[:self.MAX_OUTPUT_CHARS] + self.TRUNCATION_NOTICE
+                stderr_truncated = True
+
+            return {
+                "ok": proc.returncode == 0,
+                "returncode": proc.returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+                "stdout_truncated": stdout_truncated,
+                "stderr_truncated": stderr_truncated,
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False,
+                "error": f"WSL command timed out after {timeout_sec}s. Consider increasing timeout or running in background with redirect.",
+            }
+        except FileNotFoundError:
+            return {
+                "ok": False,
+                "error": "WSL not found. Ensure WSL is installed and the distro is available.",
+            }
+        except Exception as e:
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    # ===========================
+    # Python Sandbox Tool
+    # ===========================
+    def _tool_python_sandbox(
+        self,
+        code: str,
+        timeout_sec: int = 30,
+    ) -> Dict[str, Any]:
+        """Execute Python code in a temporary sandbox, capturing stdout and traceback."""
+        timeout_sec = max(1, min(int(timeout_sec), 120))
+
+        tmp_dir = os.path.join(self.workspace_root, "_sandbox_tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        script_name = f"sandbox_{uuid.uuid4().hex[:8]}.py"
+        script_path = os.path.join(tmp_dir, script_name)
+
+        try:
+            with open(script_path, "w", encoding="utf-8") as f:
+                f.write(code)
+
+            proc = subprocess.run(
+                ["python3", script_path],
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+                cwd=tmp_dir,
+                shell=False,
+            )
+
+            stdout = proc.stdout
+            stderr = proc.stderr
+
+            if len(stdout) > self.MAX_OUTPUT_CHARS:
+                stdout = stdout[:self.MAX_OUTPUT_CHARS] + self.TRUNCATION_NOTICE
+            if len(stderr) > self.MAX_OUTPUT_CHARS:
+                stderr = stderr[:self.MAX_OUTPUT_CHARS] + self.TRUNCATION_NOTICE
+
+            return {
+                "ok": proc.returncode == 0,
+                "returncode": proc.returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+                "script_path": script_path,
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False,
+                "error": f"Python script timed out after {timeout_sec}s.",
+                "script_path": script_path,
+            }
+        except Exception as e:
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        finally:
+            try:
+                if os.path.exists(script_path):
+                    os.remove(script_path)
+            except OSError:
+                pass
+
+    # ===========================
+    # Knowledge Base Search Tool
+    # ===========================
+    def _tool_search_knowledge(
+        self,
+        keywords: str,
+        category: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Search the local CTF knowledge base by keywords and optional category."""
+        knowledge_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "knowledge")
+
+        if not os.path.isdir(knowledge_dir):
+            return {"ok": False, "error": f"Knowledge base directory not found: {knowledge_dir}. Please create it."}
+
+        search_words = set(keywords.lower().split())
+        results = []
+
+        search_dirs = []
+        if category:
+            cat_dir = os.path.join(knowledge_dir, category.lower().strip())
+            if os.path.isdir(cat_dir):
+                search_dirs.append(cat_dir)
+            else:
+                search_dirs.append(knowledge_dir)
+        else:
+            search_dirs.append(knowledge_dir)
+
+        for search_dir in search_dirs:
+            for root, _dirs, files in os.walk(search_dir):
+                for fname in files:
+                    if not fname.endswith(".md"):
+                        continue
+                    fpath = os.path.join(root, fname)
+                    try:
+                        with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                            content = f.read()
+                    except Exception:
+                        continue
+
+                    content_lower = content.lower()
+                    fname_lower = fname.lower()
+                    score = 0
+                    for word in search_words:
+                        if word in fname_lower:
+                            score += 3
+                        score += content_lower.count(word)
+
+                    if score > 0:
+                        rel_path = os.path.relpath(fpath, knowledge_dir)
+                        results.append({
+                            "file": rel_path,
+                            "score": score,
+                            "content": content[:3000],
+                        })
+
+        results.sort(key=lambda x: x["score"], reverse=True)
+        results = results[:5]
+
+        if not results:
+            return {
+                "ok": True,
+                "message": "No matching knowledge found. Try broader keywords or different category.",
+                "available_categories": self._list_knowledge_categories(knowledge_dir),
+            }
+
+        return {
+            "ok": True,
+            "results": results,
+            "total_matches": len(results),
+        }
+
+    @staticmethod
+    def _list_knowledge_categories(knowledge_dir: str) -> List[str]:
+        """List available knowledge categories."""
+        if not os.path.isdir(knowledge_dir):
+            return []
+        return [
+            d for d in os.listdir(knowledge_dir)
+            if os.path.isdir(os.path.join(knowledge_dir, d)) and not d.startswith(".")
+        ]
