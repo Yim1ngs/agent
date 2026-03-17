@@ -185,6 +185,87 @@ Be concise, direct, and actionable. Max 300 words."""
             return None
 
     # =========================================
+    # Phase 3+: Context Reset on Advisor Trigger
+    # =========================================
+    def _compress_and_reset_context(
+        self, task: str, advice: str, messages: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """When the advisor triggers, compress all prior history into a concise
+        briefing and return a fresh message list.  This prevents the attacker
+        from being anchored by verbose failure outputs."""
+
+        # --- 1. Build compressed summary of what happened so far ---
+        sections: List[str] = []
+
+        # Discovered facts from long-term memory
+        if self.memory and self.memory.state.long_term_nodes:
+            facts = []
+            for node in sorted(
+                self.memory.state.long_term_nodes,
+                key=lambda n: n.importance,
+                reverse=True,
+            )[:8]:
+                facts.append(f"  - [Imp:{node.importance}] {node.content}")
+            if facts:
+                sections.append("[Confirmed Discoveries]\n" + "\n".join(facts))
+
+        # Failed approaches — deduplicated, concise
+        if self.memory and self.memory.state.failed_attempts:
+            seen = set()
+            fail_lines = []
+            for attempt in self.memory.state.failed_attempts:
+                key = attempt["description"][:80]
+                if key not in seen:
+                    seen.add(key)
+                    fail_lines.append(
+                        f"  - {attempt['description'][:120]} => {attempt['reason'][:100]}"
+                    )
+            # Keep at most 10 unique failures
+            if fail_lines:
+                sections.append(
+                    "[Approaches Already Tried and FAILED — Do NOT repeat these]\n"
+                    + "\n".join(fail_lines[-10:])
+                )
+
+        # Previous human/advisor hints
+        if self.memory and self.memory.state.human_hints:
+            hint_lines = [f"  - {h.text[:200]}" for h in self.memory.state.human_hints[-5:]]
+            sections.append("[Previous Hints & Advice]\n" + "\n".join(hint_lines))
+
+        # Visited URLs
+        if self.memory and self.memory.state.visited_urls:
+            sections.append(
+                "[Known URLs]\n  " + ", ".join(self.memory.state.visited_urls[-10:])
+            )
+
+        compressed_history = "\n\n".join(sections) if sections else "(no prior context)"
+
+        # --- 2. Build the reset message ---
+        system_context = WEB_SYSTEM_PROMPT
+        if self.memory:
+            memory_summary = self.memory.get_working_memory_summary()
+            system_context += f"\n\n=== Task Memory ===\n{memory_summary}\n"
+
+        reset_user_msg = (
+            f"{system_context}\n\n"
+            f"Task:\n{task}\n\n"
+            f"{'=' * 60}\n"
+            f"[CONTEXT RESET — Advisor Consultation #{self._advisor_called_count}]\n"
+            f"The previous attack phase did NOT find the flag after multiple rounds.\n"
+            f"Below is a compressed summary of everything tried so far, followed by\n"
+            f"strategic advice from a senior CTF consultant.\n"
+            f"{'=' * 60}\n\n"
+            f"## Prior Work Summary\n{compressed_history}\n\n"
+            f"## Advisor Strategic Guidance\n{advice}\n\n"
+            f"{'=' * 60}\n"
+            f"[ACTION REQUIRED] Based on the advisor's guidance above, take a\n"
+            f"FUNDAMENTALLY DIFFERENT approach. Do NOT repeat any of the failed\n"
+            f"methods listed above. Start with the advisor's concrete recommendation."
+        )
+
+        return [{"role": "user", "content": reset_user_msg}]
+
+    # =========================================
     # Phase 2: Check for flag in tool results
     # =========================================
     @staticmethod
@@ -388,18 +469,19 @@ Be concise, direct, and actionable. Max 300 words."""
                         print(f"    [Advisor] Attacker stuck for {self._consecutive_no_flag_rounds} rounds, consulting advisor...")
                         advice = await self._consult_advisor(task, run_log)
                         if advice:
-                            tool_result_blocks.append({
-                                "type": "text",
-                                "text": (
-                                    f"\n[CRITICAL ADVICE FROM ADVISOR (Consultation #{self._advisor_called_count})]\n"
-                                    f"{advice}\n"
-                                    f"[END ADVISOR] Re-evaluate your approach based on this guidance. "
-                                    f"Try a fundamentally different technique."
-                                ),
-                            })
                             if self.memory:
                                 self.memory.add_human_hint(f"[Advisor #{self._advisor_called_count}]: {advice[:300]}")
-                            self._consecutive_no_flag_rounds = 0  # Reset counter
+
+                            # Context Reset: compress history + advisor advice → fresh start
+                            messages = self._compress_and_reset_context(task, advice, messages)
+                            self._consecutive_no_flag_rounds = 0
+
+                            self._log_jsonl(run_log, {
+                                "event": "context_reset",
+                                "advisor_call_count": self._advisor_called_count,
+                                "new_message_count": len(messages),
+                            })
+                            continue  # Skip appending tool_result_blocks, restart with clean context
 
                     messages.append({"role": "user", "content": tool_result_blocks})
                     continue
