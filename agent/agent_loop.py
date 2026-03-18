@@ -30,9 +30,8 @@ Operating rules:
 10) You have a powerful CTF knowledge base. When you identify a vulnerability direction (e.g., SSTI, SQLi, ThinkPHP), use search_knowledge FIRST before blindly testing.
 """.strip()
 
-# Phase 2 config
-CONTEXT_WINDOW_MAX_MESSAGES = 16  # Keep first message (system) + last N messages
-CONSECUTIVE_FAIL_THRESHOLD = 3   # Trigger advisor after N rounds without flag
+CONTEXT_WINDOW_MAX_MESSAGES = 16
+CONSECUTIVE_FAIL_THRESHOLD = 3
 
 
 class WebCTFAgent:
@@ -64,9 +63,6 @@ class WebCTFAgent:
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
-    # =========================================
-    # Phase 2: Context Sliding Window
-    # =========================================
     @staticmethod
     def _apply_sliding_window(messages: List[Dict[str, Any]], max_messages: int = CONTEXT_WINDOW_MAX_MESSAGES) -> List[Dict[str, Any]]:
         """Keep the first message (system/task prompt) and the most recent messages.
@@ -83,9 +79,6 @@ class WebCTFAgent:
 
         return [first_msg] + recent
 
-    # =========================================
-    # Phase 2: Dynamic Memory Injection
-    # =========================================
     def _inject_memory_update(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Inject the latest TaskMemory summary into the last user message."""
         if not self.memory:
@@ -111,9 +104,6 @@ class WebCTFAgent:
 
         return msgs
 
-    # =========================================
-    # Phase 3: Advisor Agent
-    # =========================================
     def _should_consult_advisor(self) -> bool:
         """Check if the attacker has been stuck and needs strategic advice."""
         return self._consecutive_no_flag_rounds >= CONSECUTIVE_FAIL_THRESHOLD
@@ -184,9 +174,6 @@ Be concise, direct, and actionable. Max 300 words."""
             })
             return None
 
-    # =========================================
-    # Phase 3+: Context Reset on Advisor Trigger
-    # =========================================
     def _compress_and_reset_context(
         self, task: str, advice: str, messages: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
@@ -220,19 +207,17 @@ Be concise, direct, and actionable. Max 300 words."""
                     fail_lines.append(
                         f"  - {attempt['description'][:120]} => {attempt['reason'][:100]}"
                     )
-            # Keep at most 10 unique failures
+
             if fail_lines:
                 sections.append(
                     "[Approaches Already Tried and FAILED — Do NOT repeat these]\n"
                     + "\n".join(fail_lines[-10:])
                 )
 
-        # Previous human/advisor hints
         if self.memory and self.memory.state.human_hints:
             hint_lines = [f"  - {h.text[:200]}" for h in self.memory.state.human_hints[-5:]]
             sections.append("[Previous Hints & Advice]\n" + "\n".join(hint_lines))
 
-        # Visited URLs
         if self.memory and self.memory.state.visited_urls:
             sections.append(
                 "[Known URLs]\n  " + ", ".join(self.memory.state.visited_urls[-10:])
@@ -240,7 +225,6 @@ Be concise, direct, and actionable. Max 300 words."""
 
         compressed_history = "\n\n".join(sections) if sections else "(no prior context)"
 
-        # --- 2. Build the reset message ---
         system_context = WEB_SYSTEM_PROMPT
         if self.memory:
             memory_summary = self.memory.get_working_memory_summary()
@@ -265,9 +249,6 @@ Be concise, direct, and actionable. Max 300 words."""
 
         return [{"role": "user", "content": reset_user_msg}]
 
-    # =========================================
-    # Phase 2: Check for flag in tool results
-    # =========================================
     @staticmethod
     def _check_flag_in_results(tool_results: List[Dict[str, Any]], flag_regex: str = r"flag\{[A-Za-z0-9_\-]+\}") -> bool:
         """Check if any tool result contains a potential flag pattern."""
@@ -277,9 +258,6 @@ Be concise, direct, and actionable. Max 300 words."""
                 return True
         return False
 
-    # =========================================
-    # Main solve loop
-    # =========================================
     async def solve(
             self, task: str, resume_messages: Optional[List[Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
@@ -327,10 +305,8 @@ Be concise, direct, and actionable. Max 300 words."""
             for round_idx in range(1, self.max_rounds + 1):
                 effort = "high" if round_idx <= 8 else "max"
 
-                # --- Phase 2: Apply sliding window ---
                 windowed_messages = self._apply_sliding_window(messages)
 
-                # --- Phase 2: Inject dynamic memory ---
                 windowed_messages = self._inject_memory_update(windowed_messages)
 
                 self._log_jsonl(
@@ -380,8 +356,6 @@ Be concise, direct, and actionable. Max 300 words."""
                         if block.get("type") != "tool_use":
                             continue
 
-                        # --- Phase 2: Circuit Breaker ---
-                        # If a previous tool in this round failed, skip remaining tools
                         if circuit_broken:
                             tool_result_blocks.append({
                                 "type": "tool_result",
@@ -444,7 +418,6 @@ Be concise, direct, and actionable. Max 300 words."""
                             }
                         )
 
-                    # --- Phase 2: Track flag progress for advisor trigger ---
                     flag_regex = os.getenv("CTF_FLAG_REGEX", r"flag\{[A-Za-z0-9_\-]+\}")
                     if self._check_flag_in_results(round_tool_results, flag_regex):
                         self._consecutive_no_flag_rounds = 0
@@ -464,7 +437,6 @@ Be concise, direct, and actionable. Max 300 words."""
                             }
                         )
 
-                    # --- Phase 3: Consult Advisor if stuck ---
                     if self._should_consult_advisor():
                         print(f"    [Advisor] Attacker stuck for {self._consecutive_no_flag_rounds} rounds, consulting advisor...")
                         advice = await self._consult_advisor(task, run_log)
@@ -472,7 +444,6 @@ Be concise, direct, and actionable. Max 300 words."""
                             if self.memory:
                                 self.memory.add_human_hint(f"[Advisor #{self._advisor_called_count}]: {advice[:300]}")
 
-                            # Context Reset: compress history + advisor advice → fresh start
                             messages = self._compress_and_reset_context(task, advice, messages)
                             self._consecutive_no_flag_rounds = 0
 
@@ -481,12 +452,11 @@ Be concise, direct, and actionable. Max 300 words."""
                                 "advisor_call_count": self._advisor_called_count,
                                 "new_message_count": len(messages),
                             })
-                            continue  # Skip appending tool_result_blocks, restart with clean context
+                            continue
 
                     messages.append({"role": "user", "content": tool_result_blocks})
                     continue
 
-                # stop_reason != "tool_use" => final text response
                 text_parts = []
                 for b in content:
                     if b.get("type") == "text":

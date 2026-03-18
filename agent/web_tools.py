@@ -91,9 +91,6 @@ class WebToolRegistry:
         self.http = requests.Session()
         self.responses: Dict[str, Dict[str, Any]] = {}
 
-    # =========================
-    # Internal path/url helpers
-    # =========================
     def _is_under(self, path: str, root: str) -> bool:
         try:
             common = os.path.commonpath([os.path.abspath(path), os.path.abspath(root)])
@@ -128,7 +125,6 @@ class WebToolRegistry:
         if u.scheme not in ("http", "https"):
             raise ValueError(f"unsupported scheme: {u.scheme}")
 
-        # unrestricted mode (your current preference)
         if self.allowed_hosts is None:
             return
 
@@ -162,9 +158,6 @@ class WebToolRegistry:
 
         return [str(regex_patterns)]
 
-    # =========================
-    # Tool schemas for Claude
-    # =========================
     def anthropic_tools(self) -> List[Dict[str, Any]]:
         return [
             {
@@ -390,9 +383,6 @@ class WebToolRegistry:
             }
         ]
 
-    # =========================
-    # Dispatcher
-    # =========================
     def call(self, name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
         try:
             fn = getattr(self, f"_tool_{name}")
@@ -404,9 +394,6 @@ class WebToolRegistry:
         except Exception as e:
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
-    # =========================
-    # Tool implementations
-    # =========================
     def _tool_http_request(
         self,
         method: str,
@@ -484,7 +471,6 @@ class WebToolRegistry:
             except re.error as e:
                 regex_hits[pat] = [f"<regex_error: {e}>"]
 
-        # Helpful defaults
         default_hits = {
             r"flag\{[A-Za-z0-9_\-]+\}": re.findall(r"flag\{[A-Za-z0-9_\-]+\}", body),
             r"Syc\{[A-Za-z0-9_\-]+\}": re.findall(r"Syc\{[A-Za-z0-9_\-]+\}", body),
@@ -707,9 +693,6 @@ class WebToolRegistry:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    # ===========================
-    # WSL Shell Tool
-    # ===========================
     MAX_OUTPUT_CHARS = 2000
     TRUNCATION_NOTICE = "\n\n[OUTPUT TRUNCATED at 2000 chars. Redirect to a file and use grep/head to view full output.]"
 
@@ -771,9 +754,6 @@ class WebToolRegistry:
         except Exception as e:
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
-    # ===========================
-    # Python Sandbox Tool
-    # ===========================
     def _tool_python_sandbox(
         self,
         code: str,
@@ -831,9 +811,6 @@ class WebToolRegistry:
             except OSError:
                 pass
 
-    # ===========================
-    # Knowledge Base Search Tool
-    # ===========================
     def _tool_search_knowledge(
         self,
         keywords: str,

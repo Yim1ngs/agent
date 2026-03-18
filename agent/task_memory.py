@@ -42,7 +42,7 @@ class TaskMemoryState:
 
     # 短期执行流
     rounds: List[Dict[str, Any]] = field(default_factory=list)
-    # 长期事实记忆 (支持打分和遗忘)
+    # 长期事实记忆
     long_term_nodes: List[MemoryNode] = field(default_factory=list)
     # 失败记录与人类提示
     failed_attempts: List[Dict[str, Any]] = field(default_factory=list)
@@ -90,7 +90,6 @@ class TaskMemory:
         self.state.objective = desc
         self._save()
 
-    # ---------- 兼容 main.py 与 agent_loop.py 的基础方法 ----------
     def add_round(self, round_idx: int, llm_request: Dict[str, Any], llm_response: Dict[str, Any]) -> None:
         self.state.rounds.append({
             "round": round_idx,
@@ -138,7 +137,6 @@ class TaskMemory:
     def get_full_context(self) -> Dict[str, Any]:
         return asdict(self.state)
 
-    # ---------- 主动记忆与认知功能 ----------
     def store_memory(self, content: str, importance: int, confidence: int, type_: str = "fact") -> str:
         for node in self.state.long_term_nodes:
             if node.content.strip() == content.strip():
@@ -199,13 +197,11 @@ class TaskMemory:
     def get_working_memory_summary(self, max_recent_rounds: int = 3, query: str = "") -> str:
         lines = [f"Task Objective: {self.state.objective[:300]}"]
 
-        # 1. 优先展示人类干预提示 (至关重要，解决你的核心痛点)
         if self.state.human_hints:
             lines.append("\n[CRITICAL: Human Operator Hints]:")
             for hint in self.state.human_hints:
                 lines.append(f"  -> {hint.text}")
 
-        # 2. 长期记忆检索
         if self.state.long_term_nodes:
             retrieved = self.retrieve_memory(query or "CTF flags vulnerability", top_k=4)
             if retrieved:
@@ -213,13 +209,11 @@ class TaskMemory:
                 for n in retrieved:
                     lines.append(f"  - [Imp:{n.importance}/10] {n.content}")
 
-        # 3. 失败经验教训
         if self.state.failed_attempts:
             lines.append("\n[Recent Failed Tool Attempts (Do not repeat)]:")
             for attempt in self.state.failed_attempts[-3:]:
                 lines.append(f"  - {attempt['description']} => {attempt['reason']}")
 
-        # 4. 短期执行路径
         recent_rounds = self.state.rounds[-max_recent_rounds:]
         if recent_rounds:
             lines.append(f"\n[Short-Term Action Buffer ({len(recent_rounds)} rounds)]:")

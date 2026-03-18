@@ -150,7 +150,6 @@ async def main() -> None:
             print("再见")
             break
 
-        # 场景 A：恢复历史任务
         if user_input.startswith("resume "):
             task_id = user_input.split(" ", 1)[1].strip()
             try:
@@ -198,7 +197,6 @@ Goals & Constraints:
                 resume_messages=last_messages if last_messages else None
             )
 
-            # --- 4. 打印当前阶段执行结果 ---
             print("\n" + "="*40)
             if result.get("ok"):
                 print(f"🟢 [Agent 本阶段汇报]:\n{result.get('response', '')}")
